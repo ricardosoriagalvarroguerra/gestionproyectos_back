@@ -46,7 +46,13 @@ class Settings(BaseSettings):
     @property
     def effective_pg_dsn(self) -> str:
         """Return DATABASE_URL (Railway) if set, otherwise fall back to PG_DSN."""
-        return self.database_url or self.pg_dsn
+        dsn = self.database_url or self.pg_dsn
+        if not dsn:
+            raise RuntimeError(
+                "No database connection configured. "
+                "Set DATABASE_URL (Railway) or PG_DSN (local)."
+            )
+        return dsn
 
     @property
     def done_statuses(self) -> tuple[str, ...]:
