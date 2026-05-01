@@ -264,6 +264,10 @@ def _password_salt_bytes() -> bytes:
     return b"vpf-notion-internal"
 
 
+def _new_random_salt() -> bytes:
+    return secrets.token_bytes(16)
+
+
 def _hash_password(password: str, salt: bytes) -> str:
     digest = hashlib.pbkdf2_hmac(
         "sha256",
@@ -302,7 +306,6 @@ async def sync_users_and_access(
         row["user_key"]: row
         for row in existing_rows
     }
-    salt = _password_salt_bytes()
     active_user_keys = set(access_users)
     login_enabled_user_keys = set(login_users)
     workload_admin_keys = normalize_user_keys(workload_admin_user_keys)
@@ -333,6 +336,7 @@ async def sync_users_and_access(
                 continue
 
             password = generate_temporary_password(display_name)
+            user_salt = _new_random_salt()
             await cur.execute(
                 """
                 INSERT INTO notion_sync.app_user (
@@ -351,8 +355,8 @@ async def sync_users_and_access(
                 (
                     user_key,
                     display_name,
-                    _hash_password(password, salt),
-                    base64.b64encode(salt).decode("ascii"),
+                    _hash_password(password, user_salt),
+                    base64.b64encode(user_salt).decode("ascii"),
                     None,
                     can_login,
                     can_view_workload,
@@ -376,6 +380,7 @@ async def sync_users_and_access(
                 SET is_active = false,
                     can_login = false,
                     can_view_workload = false,
+                    can_view_all = false,
                     generated_password = NULL,
                     updated_at = NOW()
                 WHERE user_key <> ALL(%s);
@@ -389,6 +394,7 @@ async def sync_users_and_access(
                 SET is_active = false,
                     can_login = false,
                     can_view_workload = false,
+                    can_view_all = false,
                     generated_password = NULL,
                     updated_at = NOW();
                 """

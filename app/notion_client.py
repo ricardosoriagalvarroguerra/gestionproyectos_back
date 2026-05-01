@@ -28,17 +28,30 @@ class NotionClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    MAX_RATE_LIMIT_RETRIES = 6
+    MAX_RATE_LIMIT_DELAY_SECONDS = 60.0
+
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Handle rate limits (429) respecting Retry-After."""
+        """Handle rate limits (429) respecting Retry-After, with bounded retries and backoff."""
+        attempt = 0
         while True:
             response = await self._client.request(method, url, **kwargs)
             if response.status_code != 429:
                 response.raise_for_status()
                 return response
 
+            attempt += 1
+            if attempt > self.MAX_RATE_LIMIT_RETRIES:
+                response.raise_for_status()
+                return response
+
             retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else 1.0
-            await asyncio.sleep(delay)
+            try:
+                base_delay = float(retry_after) if retry_after else 1.0
+            except ValueError:
+                base_delay = 1.0
+            backoff = min(self.MAX_RATE_LIMIT_DELAY_SECONDS, base_delay * (2 ** (attempt - 1)))
+            await asyncio.sleep(backoff)
 
     async def get_query_target(self, database_id: str) -> Tuple[str, str]:
         """Resolve the correct query endpoint for a Notion database or data source."""

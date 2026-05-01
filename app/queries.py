@@ -52,7 +52,7 @@ task_block_flags AS (
 
 
 def _as_array(done_statuses: Sequence[str]) -> list[str]:
-    return list(done_statuses)
+    return [status.lower() for status in done_statuses]
 
 
 def _as_utc_datetime(value: Any) -> datetime | None:
@@ -165,7 +165,7 @@ async def fetch_projects(
       SELECT
         pp.proyecto_id,
         COUNT(*) AS products_total,
-        SUM(CASE WHEN pr.estado = ANY(%(done)s) THEN 1 ELSE 0 END) AS products_done
+        SUM(CASE WHEN LOWER(pr.estado) = ANY(%(done)s) THEN 1 ELSE 0 END) AS products_done
       FROM notion_sync.proyecto_producto pp
       JOIN notion_sync.productos pr ON pr.notion_page_id = pp.producto_id
       WHERE pr.archived = false
@@ -176,9 +176,9 @@ async def fetch_projects(
       SELECT
         pp.proyecto_id,
         COUNT(t.notion_page_id) AS tasks_total,
-        SUM(CASE WHEN t.estado = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done,
+        SUM(CASE WHEN LOWER(t.estado) = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done,
         SUM(CASE WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-                 AND t.estado <> ALL(%(done)s)
+                 AND LOWER(t.estado) <> ALL(%(done)s)
                  THEN 1 ELSE 0 END) AS tasks_overdue
       FROM notion_sync.proyecto_producto pp
       JOIN notion_sync.producto_tarea pt ON pt.producto_id = pp.producto_id
@@ -227,9 +227,9 @@ async def fetch_home_project_products(
       SELECT
         pt.producto_id,
         COUNT(*) AS tasks_total,
-        SUM(CASE WHEN t.estado = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done,
+        SUM(CASE WHEN LOWER(t.estado) = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done,
         SUM(CASE WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-                 AND t.estado <> ALL(%(done)s)
+                 AND LOWER(t.estado) <> ALL(%(done)s)
                  THEN 1 ELSE 0 END) AS tasks_overdue
       FROM notion_sync.producto_tarea pt
       JOIN notion_sync.tareas t ON t.notion_page_id = pt.tarea_id
@@ -302,11 +302,11 @@ async def fetch_home_overview(
         t.fecha_end,
         CASE
           WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-           AND t.estado <> ALL(%(done)s)
+           AND LOWER(t.estado) <> ALL(%(done)s)
           THEN 'overdue'
           WHEN COALESCE(t.fecha_end, t.fecha_start) >= NOW()
            AND COALESCE(t.fecha_end, t.fecha_start) <= NOW() + INTERVAL '7 days'
-           AND t.estado <> ALL(%(done)s)
+           AND LOWER(t.estado) <> ALL(%(done)s)
           THEN 'upcoming'
           ELSE NULL
         END AS alert_type,
@@ -315,11 +315,11 @@ async def fetch_home_overview(
             p.notion_page_id,
             CASE
               WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-               AND t.estado <> ALL(%(done)s)
+               AND LOWER(t.estado) <> ALL(%(done)s)
               THEN 'overdue'
               WHEN COALESCE(t.fecha_end, t.fecha_start) >= NOW()
                AND COALESCE(t.fecha_end, t.fecha_start) <= NOW() + INTERVAL '7 days'
-               AND t.estado <> ALL(%(done)s)
+               AND LOWER(t.estado) <> ALL(%(done)s)
               THEN 'upcoming'
               ELSE 'ignore'
             END
@@ -374,9 +374,9 @@ async def fetch_products_for_project(
       SELECT
         pt.producto_id,
         COUNT(*) AS tasks_total,
-        SUM(CASE WHEN t.estado = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done,
+        SUM(CASE WHEN LOWER(t.estado) = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done,
         SUM(CASE WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-                 AND t.estado <> ALL(%(done)s)
+                 AND LOWER(t.estado) <> ALL(%(done)s)
                  THEN 1 ELSE 0 END) AS tasks_overdue
       FROM notion_sync.producto_tarea pt
       JOIN notion_sync.tareas t ON t.notion_page_id = pt.tarea_id
@@ -442,7 +442,7 @@ async def fetch_tasks_for_product(
       t.contraparte,
       t.notion_url,
       CASE WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-             AND t.estado <> ALL(%(done)s)
+             AND LOWER(t.estado) <> ALL(%(done)s)
            THEN true ELSE false END AS is_overdue,
       COALESCE(tbf.blocks_other_tasks, false) AS blocks_other_tasks,
       COALESCE(tbf.is_blocked, false) AS is_blocked,
@@ -489,7 +489,7 @@ async def fetch_tasks_for_project(
       t.contraparte,
       t.notion_url,
       CASE WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-             AND t.estado <> ALL(%(done)s)
+             AND LOWER(t.estado) <> ALL(%(done)s)
            THEN true ELSE false END AS is_overdue,
       COALESCE(tbf.blocks_other_tasks, false) AS blocks_other_tasks,
       COALESCE(tbf.is_blocked, false) AS is_blocked,
@@ -527,7 +527,7 @@ async def fetch_project_dashboard(
       SELECT
         pp.proyecto_id,
         COUNT(*) AS products_total,
-        SUM(CASE WHEN pr.estado = ANY(%(done)s) THEN 1 ELSE 0 END) AS products_done
+        SUM(CASE WHEN LOWER(pr.estado) = ANY(%(done)s) THEN 1 ELSE 0 END) AS products_done
       FROM notion_sync.proyecto_producto pp
       JOIN notion_sync.productos pr ON pr.notion_page_id = pp.producto_id
       WHERE pr.archived = false
@@ -538,9 +538,9 @@ async def fetch_project_dashboard(
       SELECT
         pp.proyecto_id,
         COUNT(t.notion_page_id) AS tasks_total,
-        SUM(CASE WHEN t.estado = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done,
+        SUM(CASE WHEN LOWER(t.estado) = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done,
         SUM(CASE WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-                 AND t.estado <> ALL(%(done)s)
+                 AND LOWER(t.estado) <> ALL(%(done)s)
                  THEN 1 ELSE 0 END) AS tasks_overdue
       FROM notion_sync.proyecto_producto pp
       JOIN notion_sync.producto_tarea pt ON pt.producto_id = pp.producto_id
@@ -588,7 +588,7 @@ async def fetch_project_dashboard(
       AND {_access_exists("product", "pr")}
       AND {_access_exists("task", "t")}
       AND COALESCE(t.fecha_end, t.fecha_start) < NOW()
-      AND t.estado <> ALL(%(done)s)
+      AND LOWER(t.estado) <> ALL(%(done)s)
     ORDER BY COALESCE(t.fecha_end, t.fecha_start) ASC
     LIMIT 5;
     """
@@ -614,7 +614,7 @@ async def fetch_project_dashboard(
       AND {_access_exists("task", "t")}
       AND COALESCE(t.fecha_end, t.fecha_start) >= NOW()
       AND COALESCE(t.fecha_end, t.fecha_start) <= NOW() + INTERVAL '7 days'
-      AND t.estado <> ALL(%(done)s)
+      AND LOWER(t.estado) <> ALL(%(done)s)
     ORDER BY COALESCE(t.fecha_end, t.fecha_start) ASC
     LIMIT 5;
     """
@@ -627,7 +627,7 @@ async def fetch_project_dashboard(
       AND pr.archived = false
       AND {_access_exists("project", "pp", "proyecto_id")}
       AND {_access_exists("product", "pr")}
-      AND pr.estado = 'Revisión'
+      AND LOWER(pr.estado) = 'revisión'
     ORDER BY pr.last_edited_time ASC
     LIMIT 5;
     """
@@ -676,7 +676,7 @@ async def fetch_timeline(
                   COALESCE(t.fecha_end, t.fecha_start, t.created_time) AS "end",
                   t.estado AS status,
                   CASE WHEN COALESCE(t.fecha_end, t.fecha_start) < NOW()
-                         AND t.estado <> ALL(%(done)s)
+                         AND LOWER(t.estado) <> ALL(%(done)s)
                        THEN true ELSE false END AS is_overdue
                 FROM notion_sync.producto_tarea pt
                 JOIN notion_sync.tareas t ON t.notion_page_id = pt.tarea_id
@@ -730,7 +730,7 @@ async def fetch_timeline(
               SELECT
                 pt.producto_id,
                 COUNT(*) AS tasks_total,
-                SUM(CASE WHEN t.estado = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done
+                SUM(CASE WHEN LOWER(t.estado) = ANY(%(done)s) THEN 1 ELSE 0 END) AS tasks_done
               FROM notion_sync.producto_tarea pt
               JOIN notion_sync.tareas t ON t.notion_page_id = pt.tarea_id
               WHERE t.archived = false

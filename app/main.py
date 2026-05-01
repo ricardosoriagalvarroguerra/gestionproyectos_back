@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 import logging
 from typing import Annotated
@@ -77,12 +78,61 @@ async def require_workload_admin(
     return current_user
 
 
+def _auto_sync_interval_seconds() -> float:
+    raw = os.getenv("AUTO_SYNC_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
+async def _auto_sync_loop(interval_seconds: float) -> None:
+    """Background task: periodically run perform_sync against the configured Notion source.
+
+    Enabled by setting AUTO_SYNC_INTERVAL_SECONDS to a positive number (e.g. 21600 = 6h).
+    Runs the first sync immediately on startup, then every `interval_seconds` thereafter.
+    Errors are logged but do not stop the loop.
+    """
+    while True:
+        try:
+            pool = get_pool()
+            summary = await perform_sync(pool, settings, notion_client)
+            logger.info(
+                "auto-sync ok counts=%s duration=%.2fs",
+                summary.get("counts"),
+                summary.get("duration_seconds", 0.0),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("auto-sync iteration failed; will retry after the interval")
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            raise
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_pool(settings.effective_pg_dsn)
-    yield
-    await close_pool()
-    await notion_client.close()
+    sync_task: asyncio.Task | None = None
+    interval_seconds = _auto_sync_interval_seconds()
+    if interval_seconds > 0:
+        logger.info("Starting auto-sync loop every %.0fs", interval_seconds)
+        sync_task = asyncio.create_task(_auto_sync_loop(interval_seconds))
+    try:
+        yield
+    finally:
+        if sync_task is not None:
+            sync_task.cancel()
+            try:
+                await sync_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await close_pool()
+        await notion_client.close()
 
 
 app = FastAPI(title="Notion Sync Dashboard API", lifespan=lifespan)
