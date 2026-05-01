@@ -295,10 +295,16 @@ BASE_SYNC_INDEX_STATEMENTS = (
 
 
 async def init_pool(dsn: str, min_size: int = 1, max_size: int = 8) -> AsyncConnectionPool:
-    """Initialize a global async connection pool."""
+    """Initialize a global async connection pool with dict-row results by default."""
     global pool
     if pool is None:
-        pool = AsyncConnectionPool(conninfo=dsn, min_size=min_size, max_size=max_size, open=False)
+        pool = AsyncConnectionPool(
+            conninfo=dsn,
+            min_size=min_size,
+            max_size=max_size,
+            open=False,
+            kwargs={"row_factory": dict_row},
+        )
         await pool.open()
         await pool.wait()
         await ensure_base_sync_schema(pool)
