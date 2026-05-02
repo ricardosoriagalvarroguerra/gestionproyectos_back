@@ -330,6 +330,7 @@ async def api_workload(
 @app.get("/api/canvas")
 async def api_canvas(
     user_key: str | None = Query(None, description="Solo admins pueden pedir otro user_key"),
+    granularity: Annotated[str, Query(pattern="^(projects|products|tasks)$")] = "products",
     current_user: AuthenticatedUser = Depends(require_authenticated_user),
     conn=Depends(get_connection),
 ):
@@ -337,9 +338,9 @@ async def api_canvas(
     if target != current_user.user_key and not current_user.can_view_all:
         raise HTTPException(status_code=403, detail="No autorizado para ver el canvas de otro usuario")
     try:
-        return await fetch_canvas_graph(conn, target)
+        return await fetch_canvas_graph(conn, target, granularity=granularity)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/canvas/users")

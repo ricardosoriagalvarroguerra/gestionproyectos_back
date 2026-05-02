@@ -965,11 +965,29 @@ async def fetch_workload_overview(
     }
 
 
+CANVAS_GRANULARITIES = ("projects", "products", "tasks")
+
+
 async def fetch_canvas_graph(
     conn: psycopg.AsyncConnection,
     target_user_key: str,
+    granularity: str = "products",
 ) -> Dict[str, Any]:
-    """Return Obsidian-style graph data for a user: user node + projects + products."""
+    """Return Obsidian-style graph data for a user.
+
+    granularity:
+      - 'projects': user + projects only
+      - 'products': user + projects + products (default)
+      - 'tasks':    user + projects + products + tasks
+    """
+    if granularity not in CANVAS_GRANULARITIES:
+        raise ValueError(
+            f"granularity '{granularity}' invalida; usar uno de {CANVAS_GRANULARITIES}"
+        )
+
+    include_products = granularity in ("products", "tasks")
+    include_tasks = granularity == "tasks"
+
     async with conn.cursor() as cur:
         await cur.execute(
             """
@@ -1008,44 +1026,88 @@ async def fetch_canvas_graph(
         project_rows = await cur.fetchall()
         project_ids = [row["id"] for row in project_rows]
 
-        await cur.execute(
-            """
-            SELECT
-              pr.notion_page_id::text AS id,
-              pr.nombre AS label,
-              pr.estado,
-              pr.notion_url,
-              pr.fecha_entrega_start,
-              pr.fecha_entrega_end,
-              EXISTS (
-                SELECT 1 FROM notion_sync.user_entity_assignment uea
-                WHERE uea.user_key = %(user_key)s
-                  AND uea.entity_type = 'product'
-                  AND uea.entity_id = pr.notion_page_id
-              ) AS user_directly_assigned
-            FROM notion_sync.productos pr
-            JOIN notion_sync.user_entity_access uea ON uea.entity_id = pr.notion_page_id
-            WHERE uea.user_key = %(user_key)s
-              AND uea.entity_type = 'product'
-              AND pr.archived = false;
-            """,
-            {"user_key": target_user_key},
-        )
-        product_rows = await cur.fetchall()
-        product_ids = [row["id"] for row in product_rows]
-
+        product_rows: list[dict[str, Any]] = []
+        product_ids: list[str] = []
         project_product_links: list[dict[str, str]] = []
-        if project_ids and product_ids:
+        if include_products:
             await cur.execute(
                 """
-                SELECT pp.proyecto_id::text AS source, pp.producto_id::text AS target
-                FROM notion_sync.proyecto_producto pp
-                WHERE pp.proyecto_id::text = ANY(%(projects)s)
-                  AND pp.producto_id::text = ANY(%(products)s);
+                SELECT
+                  pr.notion_page_id::text AS id,
+                  pr.nombre AS label,
+                  pr.estado,
+                  pr.notion_url,
+                  pr.fecha_entrega_start,
+                  pr.fecha_entrega_end,
+                  EXISTS (
+                    SELECT 1 FROM notion_sync.user_entity_assignment uea
+                    WHERE uea.user_key = %(user_key)s
+                      AND uea.entity_type = 'product'
+                      AND uea.entity_id = pr.notion_page_id
+                  ) AS user_directly_assigned
+                FROM notion_sync.productos pr
+                JOIN notion_sync.user_entity_access uea ON uea.entity_id = pr.notion_page_id
+                WHERE uea.user_key = %(user_key)s
+                  AND uea.entity_type = 'product'
+                  AND pr.archived = false;
                 """,
-                {"projects": project_ids, "products": product_ids},
+                {"user_key": target_user_key},
             )
-            project_product_links = [dict(row) for row in await cur.fetchall()]
+            product_rows = await cur.fetchall()
+            product_ids = [row["id"] for row in product_rows]
+
+            if project_ids and product_ids:
+                await cur.execute(
+                    """
+                    SELECT pp.proyecto_id::text AS source, pp.producto_id::text AS target
+                    FROM notion_sync.proyecto_producto pp
+                    WHERE pp.proyecto_id::text = ANY(%(projects)s)
+                      AND pp.producto_id::text = ANY(%(products)s);
+                    """,
+                    {"projects": project_ids, "products": product_ids},
+                )
+                project_product_links = [dict(row) for row in await cur.fetchall()]
+
+        task_rows: list[dict[str, Any]] = []
+        product_task_links: list[dict[str, str]] = []
+        if include_tasks:
+            await cur.execute(
+                """
+                SELECT
+                  t.notion_page_id::text AS id,
+                  t.tarea AS label,
+                  t.estado,
+                  t.notion_url,
+                  t.fecha_start,
+                  t.fecha_end,
+                  EXISTS (
+                    SELECT 1 FROM notion_sync.user_entity_assignment uea
+                    WHERE uea.user_key = %(user_key)s
+                      AND uea.entity_type = 'task'
+                      AND uea.entity_id = t.notion_page_id
+                  ) AS user_directly_assigned
+                FROM notion_sync.tareas t
+                JOIN notion_sync.user_entity_access uea ON uea.entity_id = t.notion_page_id
+                WHERE uea.user_key = %(user_key)s
+                  AND uea.entity_type = 'task'
+                  AND t.archived = false;
+                """,
+                {"user_key": target_user_key},
+            )
+            task_rows = await cur.fetchall()
+            task_ids = [row["id"] for row in task_rows]
+
+            if product_ids and task_ids:
+                await cur.execute(
+                    """
+                    SELECT pt.producto_id::text AS source, pt.tarea_id::text AS target
+                    FROM notion_sync.producto_tarea pt
+                    WHERE pt.producto_id::text = ANY(%(products)s)
+                      AND pt.tarea_id::text = ANY(%(tasks)s);
+                    """,
+                    {"products": product_ids, "tasks": task_ids},
+                )
+                product_task_links = [dict(row) for row in await cur.fetchall()]
 
     user_node_id = f"user::{user_row['user_key']}"
     nodes: list[dict[str, Any]] = [
@@ -1069,44 +1131,70 @@ async def fetch_canvas_graph(
         }
         for row in project_rows
     )
-    nodes.extend(
-        {
-            "id": row["id"],
-            "label": row["label"] or "Sin nombre",
-            "type": "product",
-            "notion_url": row["notion_url"],
-            "estado": row["estado"],
-            "fecha_entrega_start": row["fecha_entrega_start"].isoformat() if row.get("fecha_entrega_start") else None,
-            "fecha_entrega_end": row["fecha_entrega_end"].isoformat() if row.get("fecha_entrega_end") else None,
-            "user_directly_assigned": bool(row.get("user_directly_assigned")),
-        }
-        for row in product_rows
-    )
+    if include_products:
+        nodes.extend(
+            {
+                "id": row["id"],
+                "label": row["label"] or "Sin nombre",
+                "type": "product",
+                "notion_url": row["notion_url"],
+                "estado": row["estado"],
+                "fecha_entrega_start": row["fecha_entrega_start"].isoformat() if row.get("fecha_entrega_start") else None,
+                "fecha_entrega_end": row["fecha_entrega_end"].isoformat() if row.get("fecha_entrega_end") else None,
+                "user_directly_assigned": bool(row.get("user_directly_assigned")),
+            }
+            for row in product_rows
+        )
+    if include_tasks:
+        nodes.extend(
+            {
+                "id": row["id"],
+                "label": row["label"] or "Sin nombre",
+                "type": "task",
+                "notion_url": row["notion_url"],
+                "estado": row["estado"],
+                "fecha_start": row["fecha_start"].isoformat() if row.get("fecha_start") else None,
+                "fecha_end": row["fecha_end"].isoformat() if row.get("fecha_end") else None,
+                "user_directly_assigned": bool(row.get("user_directly_assigned")),
+            }
+            for row in task_rows
+        )
 
-    project_id_set = set(project_ids)
-    product_id_set = set(product_ids)
     edges: list[dict[str, str]] = []
+    products_linked_to_projects: set[str] = set()
+    tasks_linked_to_products: set[str] = set()
 
     for row in project_rows:
         edges.append({"source": user_node_id, "target": row["id"], "kind": "user_project"})
-    products_linked_to_projects = set()
-    for link in project_product_links:
-        edges.append({"source": link["source"], "target": link["target"], "kind": "project_product"})
-        products_linked_to_projects.add(link["target"])
-    for row in product_rows:
-        if row["id"] not in products_linked_to_projects:
-            edges.append({"source": user_node_id, "target": row["id"], "kind": "user_product"})
+
+    if include_products:
+        for link in project_product_links:
+            edges.append({"source": link["source"], "target": link["target"], "kind": "project_product"})
+            products_linked_to_projects.add(link["target"])
+        for row in product_rows:
+            if row["id"] not in products_linked_to_projects:
+                edges.append({"source": user_node_id, "target": row["id"], "kind": "user_product"})
+
+    if include_tasks:
+        for link in product_task_links:
+            edges.append({"source": link["source"], "target": link["target"], "kind": "product_task"})
+            tasks_linked_to_products.add(link["target"])
+        for row in task_rows:
+            if row["id"] not in tasks_linked_to_products:
+                edges.append({"source": user_node_id, "target": row["id"], "kind": "user_task"})
 
     return {
         "user": {
             "user_key": user_row["user_key"],
             "display_name": user_row["display_name"],
         },
+        "granularity": granularity,
         "nodes": nodes,
         "edges": edges,
         "summary": {
             "projects": len(project_rows),
             "products": len(product_rows),
+            "tasks": len(task_rows),
             "edges": len(edges),
         },
     }
