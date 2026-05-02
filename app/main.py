@@ -24,6 +24,7 @@ from .config import Settings
 from .db import close_pool, get_connection, get_pool, init_pool
 from .notion_client import NotionClient
 from .queries import (
+    fetch_canvas_graph,
     fetch_home_overview,
     fetch_products_for_project,
     fetch_project_dashboard,
@@ -32,6 +33,7 @@ from .queries import (
     fetch_tasks_for_product,
     fetch_tasks_for_project,
     fetch_timeline,
+    list_canvas_users,
 )
 from .sync import perform_sync
 
@@ -323,3 +325,28 @@ async def api_workload(
     conn=Depends(get_connection),
 ):
     return await fetch_workload_overview(conn, year=year, month=month)
+
+
+@app.get("/api/canvas")
+async def api_canvas(
+    user_key: str | None = Query(None, description="Solo admins pueden pedir otro user_key"),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+    conn=Depends(get_connection),
+):
+    target = (user_key or current_user.user_key).strip()
+    if target != current_user.user_key and not current_user.can_view_all:
+        raise HTTPException(status_code=403, detail="No autorizado para ver el canvas de otro usuario")
+    try:
+        return await fetch_canvas_graph(conn, target)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/canvas/users")
+async def api_canvas_users(
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+    conn=Depends(get_connection),
+):
+    if not current_user.can_view_all:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    return {"users": await list_canvas_users(conn)}

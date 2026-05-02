@@ -963,3 +963,164 @@ async def fetch_workload_overview(
         "users": users,
         "summary": summary,
     }
+
+
+async def fetch_canvas_graph(
+    conn: psycopg.AsyncConnection,
+    target_user_key: str,
+) -> Dict[str, Any]:
+    """Return Obsidian-style graph data for a user: user node + projects + products."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT user_key, display_name, can_view_workload, can_view_all
+            FROM notion_sync.app_user
+            WHERE user_key = %s;
+            """,
+            (target_user_key,),
+        )
+        user_row = await cur.fetchone()
+        if not user_row:
+            raise ValueError(f"Usuario '{target_user_key}' no encontrado")
+
+        await cur.execute(
+            """
+            SELECT
+              p.notion_page_id::text AS id,
+              p.nombre AS label,
+              p.notion_url,
+              p.fecha_start,
+              p.fecha_end,
+              EXISTS (
+                SELECT 1 FROM notion_sync.user_entity_assignment uea
+                WHERE uea.user_key = %(user_key)s
+                  AND uea.entity_type = 'project'
+                  AND uea.entity_id = p.notion_page_id
+              ) AS user_directly_assigned
+            FROM notion_sync.proyectos p
+            JOIN notion_sync.user_entity_access uea ON uea.entity_id = p.notion_page_id
+            WHERE uea.user_key = %(user_key)s
+              AND uea.entity_type = 'project'
+              AND p.archived = false;
+            """,
+            {"user_key": target_user_key},
+        )
+        project_rows = await cur.fetchall()
+        project_ids = [row["id"] for row in project_rows]
+
+        await cur.execute(
+            """
+            SELECT
+              pr.notion_page_id::text AS id,
+              pr.nombre AS label,
+              pr.estado,
+              pr.notion_url,
+              pr.fecha_entrega_start,
+              pr.fecha_entrega_end,
+              EXISTS (
+                SELECT 1 FROM notion_sync.user_entity_assignment uea
+                WHERE uea.user_key = %(user_key)s
+                  AND uea.entity_type = 'product'
+                  AND uea.entity_id = pr.notion_page_id
+              ) AS user_directly_assigned
+            FROM notion_sync.productos pr
+            JOIN notion_sync.user_entity_access uea ON uea.entity_id = pr.notion_page_id
+            WHERE uea.user_key = %(user_key)s
+              AND uea.entity_type = 'product'
+              AND pr.archived = false;
+            """,
+            {"user_key": target_user_key},
+        )
+        product_rows = await cur.fetchall()
+        product_ids = [row["id"] for row in product_rows]
+
+        project_product_links: list[dict[str, str]] = []
+        if project_ids and product_ids:
+            await cur.execute(
+                """
+                SELECT pp.proyecto_id::text AS source, pp.producto_id::text AS target
+                FROM notion_sync.proyecto_producto pp
+                WHERE pp.proyecto_id::text = ANY(%(projects)s)
+                  AND pp.producto_id::text = ANY(%(products)s);
+                """,
+                {"projects": project_ids, "products": product_ids},
+            )
+            project_product_links = [dict(row) for row in await cur.fetchall()]
+
+    user_node_id = f"user::{user_row['user_key']}"
+    nodes: list[dict[str, Any]] = [
+        {
+            "id": user_node_id,
+            "label": user_row["display_name"] or user_row["user_key"],
+            "type": "user",
+            "user_key": user_row["user_key"],
+            "is_admin": bool(user_row.get("can_view_workload") or user_row.get("can_view_all")),
+        }
+    ]
+    nodes.extend(
+        {
+            "id": row["id"],
+            "label": row["label"] or "Sin nombre",
+            "type": "project",
+            "notion_url": row["notion_url"],
+            "fecha_start": row["fecha_start"].isoformat() if row.get("fecha_start") else None,
+            "fecha_end": row["fecha_end"].isoformat() if row.get("fecha_end") else None,
+            "user_directly_assigned": bool(row.get("user_directly_assigned")),
+        }
+        for row in project_rows
+    )
+    nodes.extend(
+        {
+            "id": row["id"],
+            "label": row["label"] or "Sin nombre",
+            "type": "product",
+            "notion_url": row["notion_url"],
+            "estado": row["estado"],
+            "fecha_entrega_start": row["fecha_entrega_start"].isoformat() if row.get("fecha_entrega_start") else None,
+            "fecha_entrega_end": row["fecha_entrega_end"].isoformat() if row.get("fecha_entrega_end") else None,
+            "user_directly_assigned": bool(row.get("user_directly_assigned")),
+        }
+        for row in product_rows
+    )
+
+    project_id_set = set(project_ids)
+    product_id_set = set(product_ids)
+    edges: list[dict[str, str]] = []
+
+    for row in project_rows:
+        edges.append({"source": user_node_id, "target": row["id"], "kind": "user_project"})
+    products_linked_to_projects = set()
+    for link in project_product_links:
+        edges.append({"source": link["source"], "target": link["target"], "kind": "project_product"})
+        products_linked_to_projects.add(link["target"])
+    for row in product_rows:
+        if row["id"] not in products_linked_to_projects:
+            edges.append({"source": user_node_id, "target": row["id"], "kind": "user_product"})
+
+    return {
+        "user": {
+            "user_key": user_row["user_key"],
+            "display_name": user_row["display_name"],
+        },
+        "nodes": nodes,
+        "edges": edges,
+        "summary": {
+            "projects": len(project_rows),
+            "products": len(product_rows),
+            "edges": len(edges),
+        },
+    }
+
+
+async def list_canvas_users(conn: psycopg.AsyncConnection) -> List[Dict[str, Any]]:
+    """Return all active users for the admin canvas selector."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT user_key, display_name, can_login, can_view_workload, can_view_all
+            FROM notion_sync.app_user
+            WHERE is_active = true
+            ORDER BY display_name ASC;
+            """
+        )
+        return await cur.fetchall()
