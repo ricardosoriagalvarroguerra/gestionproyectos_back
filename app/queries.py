@@ -1200,6 +1200,76 @@ async def fetch_canvas_graph(
     }
 
 
+async def fetch_canvas_graph_multi(
+    conn: psycopg.AsyncConnection,
+    target_user_keys: Sequence[str],
+    granularity: str = "products",
+) -> Dict[str, Any]:
+    """Build a single graph that overlays multiple users.
+
+    Shared projects/products/tasks appear once and get edges from every
+    user that has access to them, so the resulting graph shows the
+    interconnection between selected users.
+    """
+    unique_keys = []
+    seen: set[str] = set()
+    for key in target_user_keys:
+        cleaned = (key or "").strip()
+        if cleaned and cleaned not in seen:
+            unique_keys.append(cleaned)
+            seen.add(cleaned)
+    if not unique_keys:
+        raise ValueError("Debes seleccionar al menos un usuario")
+
+    nodes_by_id: Dict[str, Dict[str, Any]] = {}
+    edges_by_key: Dict[tuple[str, str, str], Dict[str, str]] = {}
+    user_summaries: List[Dict[str, Any]] = []
+    counts = {"projects": 0, "products": 0, "tasks": 0}
+
+    for user_key in unique_keys:
+        single = await fetch_canvas_graph(conn, user_key, granularity=granularity)
+        for node in single["nodes"]:
+            existing = nodes_by_id.get(node["id"])
+            if not existing:
+                nodes_by_id[node["id"]] = node
+            else:
+                # Track which users share visibility on the same item.
+                if node["type"] != "user":
+                    shared = set(existing.get("shared_user_keys") or [])
+                    shared.add(user_key)
+                    if existing.get("user_directly_assigned") and existing["type"] != "user":
+                        # Already a direct assignee, keep flag.
+                        pass
+                    if node.get("user_directly_assigned"):
+                        existing["user_directly_assigned"] = True
+                    existing["shared_user_keys"] = sorted(shared)
+        for edge in single["edges"]:
+            key = (edge["source"], edge["target"], edge["kind"])
+            edges_by_key.setdefault(key, edge)
+        user_summaries.append({
+            "user_key": single["user"]["user_key"],
+            "display_name": single["user"]["display_name"],
+            "summary": single["summary"],
+        })
+
+    # Recount unique items across the union.
+    for node in nodes_by_id.values():
+        if node["type"] == "project":
+            counts["projects"] += 1
+        elif node["type"] == "product":
+            counts["products"] += 1
+        elif node["type"] == "task":
+            counts["tasks"] += 1
+
+    return {
+        "users": user_summaries,
+        "granularity": granularity,
+        "nodes": list(nodes_by_id.values()),
+        "edges": list(edges_by_key.values()),
+        "summary": {**counts, "edges": len(edges_by_key), "users": len(unique_keys)},
+    }
+
+
 async def list_canvas_users(conn: psycopg.AsyncConnection) -> List[Dict[str, Any]]:
     """Return all active users for the admin canvas selector."""
     async with conn.cursor() as cur:

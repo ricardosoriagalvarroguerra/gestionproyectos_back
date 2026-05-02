@@ -25,6 +25,7 @@ from .db import close_pool, get_connection, get_pool, init_pool
 from .notion_client import NotionClient
 from .queries import (
     fetch_canvas_graph,
+    fetch_canvas_graph_multi,
     fetch_home_overview,
     fetch_products_for_project,
     fetch_project_dashboard,
@@ -351,3 +352,21 @@ async def api_canvas_users(
     if not current_user.can_view_all:
         raise HTTPException(status_code=403, detail="No autorizado")
     return {"users": await list_canvas_users(conn)}
+
+
+@app.get("/api/canvas/multi")
+async def api_canvas_multi(
+    user_keys: Annotated[str, Query(description="Lista CSV de user_keys (admin-only)")],
+    granularity: Annotated[str, Query(pattern="^(projects|products|tasks)$")] = "products",
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+    conn=Depends(get_connection),
+):
+    if not current_user.can_view_all:
+        raise HTTPException(status_code=403, detail="Solo admins pueden combinar canvases")
+    keys = [k.strip() for k in user_keys.split(",") if k.strip()]
+    if not keys:
+        raise HTTPException(status_code=400, detail="Debes pasar al menos un user_key en user_keys")
+    try:
+        return await fetch_canvas_graph_multi(conn, keys, granularity=granularity)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
