@@ -1175,10 +1175,22 @@ async def create_task_in_notion(
         "notion_url": record.get("notion_url"),
         "tarea": record.get("tarea"),
         "estado": record.get("estado"),
-        "fecha_start": record.get("fecha_start").isoformat() if record.get("fecha_start") else None,
-        "fecha_end": record.get("fecha_end").isoformat() if record.get("fecha_end") else None,
+        "fecha_start": _coerce_iso(record.get("fecha_start")),
+        "fecha_end": _coerce_iso(record.get("fecha_end")),
         "importancia": record.get("importancia"),
     }
+
+
+def _coerce_iso(value: Any) -> str | None:
+    """Return an ISO string for either a datetime/date or an already-ISO string."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        return iso()
+    return str(value)
 
 
 def _binding_property_name(
