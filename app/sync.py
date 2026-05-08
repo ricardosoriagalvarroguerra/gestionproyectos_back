@@ -1067,3 +1067,176 @@ async def _sync_relation_table(
             WHERE current_rows.{left_col} IS NULL;
             """
         )
+
+
+# ---------------------------------------------------------------------------
+# Notion writes — create new task in a Notion database and mirror to Postgres
+# ---------------------------------------------------------------------------
+
+
+async def create_task_in_notion(
+    pool: AsyncConnectionPool,
+    settings: Settings,
+    notion: NotionClient,
+    *,
+    product_id: str,
+    tarea: str,
+    estado: str | None = None,
+    fecha_start: str | None = None,
+    fecha_end: str | None = None,
+    importancia: str | None = None,
+    requested_by_user_key: str | None = None,
+) -> dict[str, Any]:
+    """Create a task in Notion and mirror it to Postgres.
+
+    - product_id: notion_page_id of the product the new task should belong to.
+    - tarea: title text (required).
+    - estado, importancia: optional select/status values; the API will reject
+      unknown options, surfacing as a 400 to the caller.
+    - fecha_start / fecha_end: optional ISO date strings.
+    - requested_by_user_key: when set, the creator gets immediate access.
+    """
+    title = (tarea or "").strip()
+    if not title:
+        raise ValueError("El campo 'tarea' es requerido")
+
+    target_type, target_id = await notion.get_query_target(settings.db_tareas_id)
+    schema = await notion.get_source_schema(settings.db_tareas_id)
+    properties_def: dict[str, Any] = schema.get("properties") or {}
+
+    # Resolve fixed-property bindings so we know each property's exact name in
+    # this data_source (handles renames / accent variations).
+    async with pool.connection() as conn:
+        bindings = await _resolve_fixed_property_bindings(
+            conn,
+            data_source_id=target_id,
+            properties=properties_def,
+            aliases=TASK_FIXED_PROPERTY_ALIASES,
+        )
+        await conn.commit()
+
+    name_for = lambda canonical: _binding_property_name(properties_def, bindings, canonical)
+
+    notion_props: dict[str, Any] = {}
+
+    title_name = name_for("tarea")
+    if not title_name:
+        raise ValueError("La base de Tareas no expone una propiedad 'Tarea' (title)")
+    notion_props[title_name] = {"title": [{"text": {"content": title}}]}
+
+    productos_name = name_for("productos")
+    if productos_name:
+        notion_props[productos_name] = {"relation": [{"id": product_id}]}
+
+    if estado:
+        estado_name = name_for("estado")
+        if estado_name:
+            estado_def = properties_def.get(estado_name) or {}
+            ptype = estado_def.get("type")
+            if ptype == "status":
+                notion_props[estado_name] = {"status": {"name": estado}}
+            else:
+                notion_props[estado_name] = {"select": {"name": estado}}
+
+    if importancia:
+        imp_name = name_for("importancia")
+        if imp_name:
+            notion_props[imp_name] = {"select": {"name": importancia}}
+
+    if fecha_start or fecha_end:
+        fecha_name = name_for("fecha")
+        if fecha_name:
+            payload: dict[str, Any] = {}
+            if fecha_start:
+                payload["start"] = fecha_start
+            if fecha_end:
+                payload["end"] = fecha_end
+            notion_props[fecha_name] = {"date": payload}
+
+    new_page = await notion.create_page(target_type, target_id, notion_props)
+
+    # Mirror into Postgres so the new task shows up immediately for the user.
+    record, rel = _parse_task(new_page, bindings)
+    new_page_id = record["notion_page_id"]
+
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await _upsert_rows(conn, "notion_sync.tareas", [record])
+            await _ensure_relation(conn, "notion_sync.producto_tarea", "producto_id", "tarea_id", product_id, new_page_id)
+            for prod_id, _ in rel.get("products", []):
+                if prod_id != product_id:
+                    await _ensure_relation(conn, "notion_sync.producto_tarea", "producto_id", "tarea_id", prod_id, new_page_id)
+            if requested_by_user_key:
+                await _grant_access(conn, requested_by_user_key, "task", new_page_id)
+                await _grant_assignment(conn, requested_by_user_key, "task", new_page_id)
+
+    return {
+        "task_id": new_page_id,
+        "notion_url": record.get("notion_url"),
+        "tarea": record.get("tarea"),
+        "estado": record.get("estado"),
+        "fecha_start": record.get("fecha_start").isoformat() if record.get("fecha_start") else None,
+        "fecha_end": record.get("fecha_end").isoformat() if record.get("fecha_end") else None,
+        "importancia": record.get("importancia"),
+    }
+
+
+def _binding_property_name(
+    properties_def: dict[str, Any],
+    bindings: dict[str, str],
+    canonical_name: str,
+) -> str | None:
+    property_id = bindings.get(canonical_name)
+    if not property_id:
+        return None
+    for name, prop_def in properties_def.items():
+        if isinstance(prop_def, dict) and prop_def.get("id") == property_id:
+            return name
+    return None
+
+
+async def _ensure_relation(
+    conn: psycopg.AsyncConnection,
+    target_table: str,
+    left_col: str,
+    right_col: str,
+    left_id: str,
+    right_id: str,
+) -> None:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            f"""
+            INSERT INTO {target_table} ({left_col}, {right_col})
+            VALUES (%s::uuid, %s::uuid)
+            ON CONFLICT DO NOTHING;
+            """,
+            (left_id, right_id),
+        )
+
+
+async def _grant_access(
+    conn: psycopg.AsyncConnection, user_key: str, entity_type: str, entity_id: str
+) -> None:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            INSERT INTO notion_sync.user_entity_access (user_key, entity_type, entity_id)
+            VALUES (%s, %s, %s::uuid)
+            ON CONFLICT DO NOTHING;
+            """,
+            (user_key, entity_type, entity_id),
+        )
+
+
+async def _grant_assignment(
+    conn: psycopg.AsyncConnection, user_key: str, entity_type: str, entity_id: str
+) -> None:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            INSERT INTO notion_sync.user_entity_assignment (user_key, entity_type, entity_id)
+            VALUES (%s, %s, %s::uuid)
+            ON CONFLICT DO NOTHING;
+            """,
+            (user_key, entity_type, entity_id),
+        )

@@ -36,7 +36,7 @@ from .queries import (
     fetch_timeline,
     list_canvas_users,
 )
-from .sync import perform_sync
+from .sync import create_task_in_notion, perform_sync
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,14 @@ notion_client = NotionClient(settings.notion_token, settings.notion_version, tim
 class LoginPayload(BaseModel):
     user_key: str
     password: str
+
+
+class CreateTaskPayload(BaseModel):
+    tarea: str
+    estado: str | None = None
+    importancia: str | None = None
+    fecha_start: str | None = None
+    fecha_end: str | None = None
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -277,6 +285,57 @@ async def api_product_tasks(
     conn=Depends(get_connection),
 ):
     return await fetch_tasks_for_product(conn, product_id, settings.done_statuses, current_user.user_key)
+
+
+@app.post("/api/products/{product_id}/tasks")
+async def api_create_product_task(
+    product_id: str,
+    payload: CreateTaskPayload,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+    conn=Depends(get_connection),
+):
+    # Verify the user can see this product (admins always can).
+    if not current_user.can_view_all:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT 1 FROM notion_sync.user_entity_access
+                WHERE user_key = %s AND entity_type = 'product' AND entity_id = %s::uuid
+                LIMIT 1;
+                """,
+                (current_user.user_key, product_id),
+            )
+            row = await cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=403, detail="No autorizado para crear tareas en este producto")
+
+    pool = get_pool()
+    try:
+        return await create_task_in_notion(
+            pool,
+            settings,
+            notion_client,
+            product_id=product_id,
+            tarea=payload.tarea,
+            estado=payload.estado,
+            importancia=payload.importancia,
+            fecha_start=payload.fecha_start,
+            fecha_end=payload.fecha_end,
+            requested_by_user_key=current_user.user_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        detail = {
+            "source": "notion_api",
+            "status_code": exc.response.status_code if exc.response else None,
+            "body": exc.response.text if exc.response else None,
+        }
+        logger.exception("Notion rejected create_page: %s", detail)
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to create task")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/projects/{project_id}/tasks")

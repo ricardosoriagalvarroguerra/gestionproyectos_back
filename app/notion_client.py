@@ -107,6 +107,34 @@ class NotionClient:
         self._source_schema_cache[cache_key] = schema
         return schema
 
+    async def create_page(
+        self,
+        target_type: str,
+        target_id: str,
+        properties: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Create a new page in a Notion database/data_source.
+
+        properties must be a Notion-shaped property map, e.g.
+            {
+              "Tarea": {"title": [{"text": {"content": "Mi tarea"}}]},
+              "Productos (Hub)": {"relation": [{"id": "<page-id>"}]},
+              "Estado": {"status": {"name": "Sin empezar"}},
+              "Fecha":  {"date": {"start": "2026-05-10", "end": "2026-05-15"}}
+            }
+        Returns the freshly created page object.
+        """
+        if target_type == "data_source":
+            parent = {"type": "data_source_id", "data_source_id": target_id}
+        elif target_type == "database":
+            parent = {"type": "database_id", "database_id": target_id}
+        else:
+            raise ValueError(f"Unknown Notion target type: {target_type}")
+
+        payload = {"parent": parent, "properties": properties}
+        resp = await self._request("POST", "/v1/pages", json=payload)
+        return resp.json()
+
     async def query_all_pages(self, target_type: str, target_id: str) -> List[Dict[str, Any]]:
         """Query pages using either data_sources or databases with pagination."""
         items: list[dict[str, Any]] = []
